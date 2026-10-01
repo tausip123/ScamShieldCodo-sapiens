@@ -85,6 +85,29 @@ Accepts either `{"text": "..."}` or `{"message": "..."}`.
 }
 ```
 
+#### `POST /api/v1/investigate/image`
+Accepts `multipart/form-data` with an image file (`file`) of a screenshot (WhatsApp chat, SMS, fake receipt, QR code) and optional form fields (`optional_text`, `force_heuristic`).
+
+**Sample `curl` Request:**
+```bash
+curl -X POST http://localhost:8000/api/v1/investigate/image \
+  -F "file=@screenshot.png" \
+  -F "optional_text=Received via SMS"
+```
+
+**Response includes `extracted_text`:**
+```json
+{
+  "status": "success",
+  "verdict": "SCAM",
+  "risk_score": 90,
+  "why": ["Deceptive domain 'sbi-kyc-update.xyz' found in screenshot"],
+  "actions": ["1. DO NOT click links..."],
+  "extracted_text": "Dear customer, your SBI account will be blocked today...",
+  "engine": "gemini_agent"
+}
+```
+
 #### `GET /api/v1/samples`
 Returns preloaded test cases for quick evaluator verification.
 

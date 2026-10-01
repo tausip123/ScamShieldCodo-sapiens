@@ -1,10 +1,10 @@
 """ScamShield REST API (FastAPI) for Hackathon Evaluation."""
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 
-from engine import investigate, MODEL
+from engine import investigate, investigate_image, MODEL
 
 app = FastAPI(
     title="ScamShield API",
@@ -59,6 +59,10 @@ class InvestigationResponse(BaseModel):
     raw_text: Optional[str] = None
 
 
+class ImageInvestigationResponse(InvestigationResponse):
+    extracted_text: Optional[str] = Field(default="", description="Text transcribed from the screenshot using AI vision OCR")
+
+
 @app.get("/", tags=["General"])
 def root():
     return {
@@ -81,7 +85,8 @@ def health_check():
             "heuristic_fallback": True,
             "ssrf_protection": True,
             "apk_detection": True,
-            "upi_heuristic": True
+            "upi_heuristic": True,
+            "multimodal_image_ocr": True
         }
     }
 
@@ -141,6 +146,55 @@ def investigate_endpoint(req: InvestigationRequest):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Investigation failed: {type(exc).__name__}: {str(exc)}"
+        )
+
+
+@app.post(
+    "/api/v1/investigate/image",
+    response_model=ImageInvestigationResponse,
+    summary="Investigate Suspicious Screenshot or Image",
+    tags=["Investigation"]
+)
+async def investigate_image_endpoint(
+    file: UploadFile = File(..., description="Screenshot of SMS, WhatsApp chat, payment dialog, or QR code"),
+    optional_text: Optional[str] = Form(default=None, description="Optional extra notes or context from user"),
+    force_heuristic: bool = Form(default=False, description="Run rule engine on transcribed text")
+):
+    """
+    Multimodal Image Threat Investigation:
+    - Extracts visible message text, headers, and identifiers using Gemini vision.
+    - Inspects extracted entities through ScamShield's threat engine.
+    """
+    try:
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Uploaded image file is empty.")
+        mime_type = file.content_type or "image/png"
+        result = investigate_image(
+            image_bytes=content,
+            mime_type=mime_type,
+            optional_text=optional_text or "",
+            force_heuristic=force_heuristic
+        )
+        return {
+            "status": "success",
+            "verdict": result["verdict"],
+            "risk_score": result["risk_score"],
+            "why": result.get("why", []),
+            "actions": result.get("actions", []),
+            "entities": result.get("entities", {}),
+            "complaint": result.get("complaint"),
+            "engine": result.get("engine", "unknown"),
+            "fallback_reason": result.get("fallback_reason"),
+            "raw_text": result.get("raw_text"),
+            "extracted_text": result.get("extracted_text", "")
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Image investigation failed: {type(exc).__name__}: {str(exc)}"
         )
 
 

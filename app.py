@@ -26,6 +26,7 @@ from engine import (
     draft_complaint,
     evaluate_heuristic,
     investigate,
+    investigate_image,
     _parse_report,
     _get_gemini_client,
 )
@@ -60,10 +61,14 @@ def run_agent(user_text: str, ui):
                 if hasattr(ui, "write"):
                     ui.write(f"Tool: **{call.name}**")
                 if hasattr(ui, "json"):
-                    ui.json(out)
+                    if isinstance(out, (dict, list)):
+                        ui.json(out)
+                    else:
+                        ui.code(str(out))
+                serialized_res = json.dumps(out) if isinstance(out, (dict, list)) else json.dumps({"output": str(out)})
                 history.append({
                     "type": "function_result", "name": call.name, "call_id": call.id,
-                    "result": [{"type": "text", "text": json.dumps(out) if not isinstance(out, str) else out}],
+                    "result": [{"type": "text", "text": serialized_res}],
                 })
         return "Investigation stopped: step limit reached."
     except Exception as exc:
@@ -360,14 +365,52 @@ def render_ui():
     st.markdown(
         "<div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; font-size: 0.8rem; color: #64748b;'>"
         "<span>🔒 <strong>Zero-Retention Guarantee:</strong> Processed with store=False. No personal logs stored.</span>"
-        "<span>🛡️ Heuristic Resilience & AI Defense</span>"
+        "<span>🛡️ Gemini 3.5 Flash Lite & Heuristic Defense</span>"
         "</div>",
         unsafe_allow_html=True
     )
 
-    investigate_clicked = st.button("⚡ Run Threat Investigation", type="primary", use_container_width=True)
+    tab_text, tab_image = st.tabs(["💬 Text / Message / Link", "📸 Screenshot / Image Upload"])
 
-    if investigate_clicked and msg.strip():
+    investigate_text_clicked = False
+    investigate_image_clicked = False
+    uploaded_file = None
+
+    with tab_text:
+        st.markdown("<p style='font-size: 0.82rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #94a3b8; margin-bottom: 8px;'>💡 Quick Load Sample Scenarios</p>", unsafe_allow_html=True)
+        samples = {
+            "🚨 Fake KYC SMS": "Dear customer, your SBI account will be blocked today. Update KYC immediately: http://sbi-kyc-update.xyz/login",
+            "💸 UPI Refund Scam": "Hi, I am sending your refund of Rs. 4,999. Please approve the collect request from refund.support8834@okybl and enter your UPI PIN.",
+            "⚡ Electricity Cutoff": "URGENT: Your electricity connection will be DISCONNECTED tonight at 9:30 PM due to unpaid bill of Rs. 1,450. Call executive at +919876543210 or pay at http://bijli-bill-update.xyz/pay",
+            "✅ Legitimate Alert": "Dear SBI Customer, your A/C ending with 4821 has been debited by INR 350.00 on 01-Oct-26 via UPI. Ref No 427819382104. If not done by you, visit https://www.sbi.co.in or call 18001234. Never share your OTP, UPI PIN, or CVV.",
+        }
+
+        cols = st.columns(len(samples))
+        for c, (name, txt) in zip(cols, samples.items()):
+            if c.button(name, key=f"sample_{name}", use_container_width=True):
+                st.session_state["msg"] = txt
+
+        msg = st.text_area(
+            "Paste Suspicious Message, URL, or UPI Request",
+            key="msg",
+            height=140,
+            placeholder="Paste suspicious text here (e.g. SMS, WhatsApp message, Telegram task, or payment link). Never paste OTPs or UPI PINs."
+        )
+        investigate_text_clicked = st.button("⚡ Run Threat Investigation", type="primary", use_container_width=True)
+
+    with tab_image:
+        st.markdown("<p style='color: #94a3b8; font-size: 0.88rem; margin-bottom: 8px;'>Upload a screenshot of a suspicious WhatsApp chat, SMS, fake transaction receipt, or QR code:</p>", unsafe_allow_html=True)
+        uploaded_file = st.file_uploader(
+            "Upload Screenshot",
+            type=["png", "jpg", "jpeg", "webp"],
+            label_visibility="collapsed"
+        )
+        if uploaded_file is not None:
+            st.image(uploaded_file, caption="Uploaded Threat Evidence", use_container_width=True)
+        investigate_image_clicked = st.button("⚡ Investigate Screenshot", type="primary", use_container_width=True)
+
+    # Execution logic
+    if investigate_text_clicked and msg.strip():
         with st.status("Agent is investigating indicators...", expanded=True) as status:
             try:
                 answer = run_agent(msg, st)
@@ -379,104 +422,126 @@ def render_ui():
                 status.update(label="✕ Investigation Encountered An Error", state="error")
 
         if error_msg:
-            st.markdown(f"""
-            <div class="ss-section-box" style="border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.08);">
-                <div style="color: #f87171; font-weight: 700; font-size: 1rem; margin-bottom: 6px;">Investigation Error</div>
-                <div style="color: #cbd5e1; font-size: 0.88rem;">{error_msg}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.error(f"Investigation Error: {error_msg}")
         else:
             parsed = _parse_report(answer)
-            verdict = parsed["verdict"]
-            score = parsed["risk_score"]
+            _render_results(parsed, answer, msg)
 
-            if verdict == "SCAM":
-                card_class = "ss-verdict-scam"
-                verdict_badge = "<span style='background: #ef4444; color: white; padding: 4px 12px; border-radius: 6px; font-weight: 800; font-size: 0.85rem;'>🚨 HIGH RISK SCAM</span>"
-                bar_color = "linear-gradient(90deg, #f59e0b 0%, #ef4444 100%)"
-            elif verdict == "SUSPICIOUS":
-                card_class = "ss-verdict-suspicious"
-                verdict_badge = "<span style='background: #f59e0b; color: #1e1b4b; padding: 4px 12px; border-radius: 6px; font-weight: 800; font-size: 0.85rem;'>⚠️ SUSPICIOUS ACTIVITY</span>"
-                bar_color = "linear-gradient(90deg, #10b981 0%, #f59e0b 100%)"
-            else:
-                card_class = "ss-verdict-safe"
-                verdict_badge = "<span style='background: #10b981; color: white; padding: 4px 12px; border-radius: 6px; font-weight: 800; font-size: 0.85rem;'>🛡️ VERIFIED / SAFE</span>"
-                bar_color = "#10b981"
+    elif investigate_image_clicked and uploaded_file is not None:
+        with st.status("Extracting text and analyzing screenshot with Gemini 3.5 vision...", expanded=True) as status:
+            try:
+                img_bytes = uploaded_file.getvalue()
+                mime_type = uploaded_file.type or "image/png"
+                img_res = investigate_image(img_bytes, mime_type=mime_type, ui=st)
+                status.update(label="✓ Screenshot Investigation Completed", state="complete")
+                error_msg = None
+            except Exception as exc:
+                img_res = None
+                error_msg = str(exc)
+                status.update(label="✕ Image Investigation Failed", state="error")
 
-            st.markdown(f"""
-            <div class="ss-verdict-card {card_class}">
-                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-                    <div>{verdict_badge}</div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 1.15rem; font-weight: 700; color: #f8fafc;">
-                        RISK SCORE: <span style="font-size: 1.4rem;">{score}</span><span style="color: #64748b; font-size: 0.9rem;">/100</span>
-                    </div>
-                </div>
-                <div class="ss-score-bar-bg">
-                    <div class="ss-score-bar-fill" style="width: {score}%; background: {bar_color};"></div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+        if error_msg:
+            st.error(f"Image Investigation Error: {error_msg}")
+        elif img_res:
+            if img_res.get("extracted_text"):
+                st.info(f"**Transcribed Text from Image:**\n\n_{img_res['extracted_text']}_")
+            _render_results(img_res, img_res.get("raw_text") or "", img_res.get("extracted_text", "Screenshot"))
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"""
-                <div class="ss-section-box">
-                    <div class="ss-section-title">🔍 Evidence & Risk Signals (WHY)</div>
-                    <div style="color: #e2e8f0; font-size: 0.88rem; line-height: 1.6;">
-                        {"<br>• ".join([""] + parsed['why']) if parsed['why'] else 'No specific threat markers flagged.'}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            with col2:
-                st.markdown(f"""
-                <div class="ss-section-box">
-                    <div class="ss-section-title">🛡️ Recommended Next Steps</div>
-                    <div style="color: #e2e8f0; font-size: 0.88rem; line-height: 1.6;">
-                        {"<br>".join(parsed['actions']) if parsed['actions'] else '1. Verify sender through official app or statement.'}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            if verdict in {"SCAM", "SUSPICIOUS"}:
-                complaint_text = parsed.get("complaint") or ""
-                if not complaint_text:
-                    complaint_text = draft_complaint(
-                        scam_type="Online Phishing / Fraud",
-                        summary=f"Suspicious message investigated: {msg[:120]}...",
-                        evidence="; ".join(parsed["why"][:3]),
-                        amount_lost="None"
-                    )
-
-                st.markdown("""
-                <div class="ss-section-box" style="border-color: rgba(239, 68, 68, 0.35); background: rgba(15, 23, 42, 0.85);">
-                    <div class="ss-section-title" style="color: #f87171;">
-                        📝 Editable Cybercrime Complaint Draft (For cybercrime.gov.in / Helpline 1930)
-                    </div>
-                """, unsafe_allow_html=True)
-
-                st.text_area(
-                    "Review and edit this complaint draft before submitting:",
-                    value=complaint_text,
-                    height=180,
-                    key="editable_complaint_area"
-                )
-
-                st.markdown("""
-                    <div style="display: flex; gap: 12px; align-items: center; margin-top: 10px; flex-wrap: wrap;">
-                        <a href="https://cybercrime.gov.in" target="_blank" style="display: inline-flex; align-items: center; gap: 6px; background: #ef4444; color: white; padding: 7px 16px; border-radius: 8px; font-weight: 700; text-decoration: none; font-size: 0.85rem; box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3);">
-                            🚨 File at cybercrime.gov.in
-                        </a>
-                        <span style="color: #94a3b8; font-size: 0.82rem;">Or dial <strong>1930</strong> immediately from your phone to report financial fraud.</span>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            with st.expander("🔍 View Raw Agent Output & Tool Telemetry"):
-                st.markdown(answer)
-
-    elif investigate_clicked:
+    elif investigate_text_clicked:
         st.warning("Please paste a message or select a sample scenario first.")
+    elif investigate_image_clicked:
+        st.warning("Please upload a screenshot image first.")
+
+
+def _render_results(parsed, raw_output, source_text):
+    verdict = parsed["verdict"]
+    score = parsed["risk_score"]
+
+    if verdict == "SCAM":
+        card_class = "ss-verdict-scam"
+        verdict_badge = "<span style='background: #ef4444; color: white; padding: 4px 12px; border-radius: 6px; font-weight: 800; font-size: 0.85rem;'>🚨 HIGH RISK SCAM</span>"
+        bar_color = "linear-gradient(90deg, #f59e0b 0%, #ef4444 100%)"
+    elif verdict == "SUSPICIOUS":
+        card_class = "ss-verdict-suspicious"
+        verdict_badge = "<span style='background: #f59e0b; color: #1e1b4b; padding: 4px 12px; border-radius: 6px; font-weight: 800; font-size: 0.85rem;'>⚠️ SUSPICIOUS ACTIVITY</span>"
+        bar_color = "linear-gradient(90deg, #10b981 0%, #f59e0b 100%)"
+    else:
+        card_class = "ss-verdict-safe"
+        verdict_badge = "<span style='background: #10b981; color: white; padding: 4px 12px; border-radius: 6px; font-weight: 800; font-size: 0.85rem;'>🛡️ VERIFIED / SAFE</span>"
+        bar_color = "#10b981"
+
+    st.markdown(f"""
+    <div class="ss-verdict-card {card_class}">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <div>{verdict_badge}</div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 1.15rem; font-weight: 700; color: #f8fafc;">
+                RISK SCORE: <span style="font-size: 1.4rem;">{score}</span><span style="color: #64748b; font-size: 0.9rem;">/100</span>
+            </div>
+        </div>
+        <div class="ss-score-bar-bg">
+            <div class="ss-score-bar-fill" style="width: {score}%; background: {bar_color};"></div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"""
+        <div class="ss-section-box">
+            <div class="ss-section-title">🔍 Evidence & Risk Signals (WHY)</div>
+            <div style="color: #e2e8f0; font-size: 0.88rem; line-height: 1.6;">
+                {"<br>• ".join([""] + parsed['why']) if parsed['why'] else 'No specific threat markers flagged.'}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col2:
+        st.markdown(f"""
+        <div class="ss-section-box">
+            <div class="ss-section-title">🛡️ Recommended Next Steps</div>
+            <div style="color: #e2e8f0; font-size: 0.88rem; line-height: 1.6;">
+                {"<br>".join(parsed['actions']) if parsed['actions'] else '1. Verify sender through official app or statement.'}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    if verdict in {"SCAM", "SUSPICIOUS"}:
+        complaint_text = parsed.get("complaint") or ""
+        if not complaint_text:
+            res_c = draft_complaint(
+                scam_type="Online Phishing / Fraud",
+                summary=f"Suspicious message investigated: {source_text[:120]}...",
+                evidence="; ".join(parsed["why"][:3]) if isinstance(parsed.get("why"), list) else str(parsed.get("why", "")),
+                amount_lost="None"
+            )
+            complaint_text = res_c.get("complaint", "") if isinstance(res_c, dict) else str(res_c)
+
+        st.markdown("""
+        <div class="ss-section-box" style="border-color: rgba(239, 68, 68, 0.35); background: rgba(15, 23, 42, 0.85);">
+            <div class="ss-section-title" style="color: #f87171;">
+                📝 Editable Cybercrime Complaint Draft (For cybercrime.gov.in / Helpline 1930)
+            </div>
+        """, unsafe_allow_html=True)
+
+        st.text_area(
+            "Review and edit this complaint draft before submitting:",
+            value=complaint_text,
+            height=180,
+            key=f"editable_complaint_{abs(hash(source_text)) % 10000}"
+        )
+
+        st.markdown("""
+            <div style="display: flex; gap: 12px; align-items: center; margin-top: 10px; flex-wrap: wrap;">
+                <a href="https://cybercrime.gov.in" target="_blank" style="display: inline-flex; align-items: center; gap: 6px; background: #ef4444; color: white; padding: 7px 16px; border-radius: 8px; font-weight: 700; text-decoration: none; font-size: 0.85rem; box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3);">
+                    🚨 File at cybercrime.gov.in
+                </a>
+                <span style="color: #94a3b8; font-size: 0.82rem;">Or dial <strong>1930</strong> immediately from your phone to report financial fraud.</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with st.expander("🔍 View Raw Agent Output & Tool Telemetry"):
+        st.markdown(raw_output)
 
 
 # Only run UI automatically if executed directly by Streamlit runner
